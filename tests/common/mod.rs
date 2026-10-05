@@ -120,9 +120,36 @@ impl Errors {
     }
 }
 
+/// Read a text file, transparently decompressing a gzipped one. The differential
+/// cases store every file gzipped; the BATF fixtures do not.
+pub fn read_text(path: &Path) -> String {
+    let mut reader = methyltfr::io::open_maybe_gzipped(path)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut out = String::new();
+    std::io::Read::read_to_string(&mut reader, &mut out)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    out
+}
+
+/// Resolve `name` or `name.gz` inside `dir`, the same way the R oracles do.
+pub fn resolve_case_file(dir: &Path, name: &str) -> PathBuf {
+    let plain = dir.join(name);
+    if plain.exists() {
+        return plain;
+    }
+    let gz = dir.join(format!("{name}.gz"));
+    assert!(
+        gz.exists(),
+        "{} and {} are both missing",
+        plain.display(),
+        gz.display()
+    );
+    gz
+}
+
 /// Read a two-column TSV as `(f64, f64)` pairs.
 pub fn read_pairs(path: &Path) -> Vec<(f64, f64)> {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = read_text(path);
     text.lines()
         .skip(1)
         .filter(|l| !l.is_empty())
@@ -137,7 +164,7 @@ pub fn read_pairs(path: &Path) -> Vec<(f64, f64)> {
 
 /// Read a tab-separated file with a header into `(header, rows)` of strings.
 pub fn read_columns(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let text = read_text(path);
     let mut lines = text.lines();
     let header: Vec<String> = lines
         .next()
@@ -272,7 +299,7 @@ pub struct ExpectedSite {
 /// Read one of the Tier A `*.expected.tsv` files written by
 /// `scripts/gen_parser_expectations.R`.
 pub fn expected_sites(ty: &str, suffix: &str) -> Vec<ExpectedSite> {
-    let path = fixture(&format!("parsers/{ty}.expected{suffix}.tsv"));
+    let path = resolve_case_file(&fixture("parsers"), &format!("{ty}.expected{suffix}.tsv"));
     let (header, rows) = read_columns(&path);
     let chr = col(&header, &rows, "chr");
     let start = col(&header, &rows, "start");

@@ -33,4 +33,4 @@ pub use gc::GcBins;
 pub use model::{
     Annotation, ChromTable, GcFreq, GcWindow, Methylome, MotifAnnotation, Range, Site, Strand,
 };
-pub use pipeline::{InputFormat, Options, Row, Sample, run};
+pub use pipeline::{CaseOutput, InputFormat, Options, Row, Sample, run};

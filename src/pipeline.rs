@@ -18,9 +18,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::deviation::{compute_observed, deviations, motif_width_of};
+use crate::deviation::{Deviation, compute_observed, deviations, motif_width_of};
 use crate::error::{Error, Result};
-use crate::expected::compute_expectations;
+use crate::expected::{Profile, compute_expectations};
 use crate::gc::{GcBins, bin_means, reduce_windows_by_enhancer};
 use crate::intervals::StartIndex;
 use crate::io::methylome::read_methylome;
@@ -97,7 +97,12 @@ pub fn log(msg: impl AsRef<str>) {
 
 /// Load the annotation, then apply the enhancer reduction to the GC windows
 /// exactly once (`AGENT_PLAN.md` section 2.6).
-pub fn load_annotation(dir: &Path, options: &Options) -> Result<Annotation> {
+///
+/// The chromosome table is returned alongside the annotation and must be the
+/// **same** table every sample is read into. Chromosome identity in this crate is
+/// a `u32` from that one table, so two tables would silently compare unrelated
+/// ids as if they were chromosomes.
+pub fn load_annotation(dir: &Path, options: &Options) -> Result<(Annotation, ChromTable)> {
     let mut chroms = ChromTable::new();
     let mut annotation = read_annotation(
         dir,
@@ -115,7 +120,7 @@ pub fn load_annotation(dir: &Path, options: &Options) -> Result<Annotation> {
         ));
         annotation.gc_windows = reduced;
     }
-    Ok(annotation)
+    Ok((annotation, chroms))
 }
 
 /// Drop motifs with no binding sites or no matrix, as `valid_core_motifs` does.
@@ -138,17 +143,63 @@ pub fn valid_motifs(annotation: &Annotation) -> Result<Vec<usize>> {
     Ok(valid)
 }
 
+/// Everything one sample against one annotation produces, in the shape the
+/// reference oracles write. The CLI needs only [`Row`]; the differential tests
+/// need the intermediate profiles to compare against `expected_bins.tsv`,
+/// `observed_profile.tsv` and `expected_profile.tsv`.
+#[derive(Clone, Debug)]
+pub struct CaseOutput {
+    pub sample: String,
+    pub motif: String,
+    pub bins: GcBins,
+    pub observed: Profile,
+    pub expected: Profile,
+    pub deviation: Deviation,
+}
+
+/// Run one sample against a single-motif annotation and return every intermediate,
+/// or upstream's error.
+pub fn run_case(
+    sample: &Sample,
+    annotation: &Annotation,
+    options: &Options,
+    chroms: &mut ChromTable,
+) -> Result<CaseOutput> {
+    let methylome = load_sample(sample, options, chroms)?;
+    let bins = gc_bins(&methylome, annotation, options)?;
+    let motif = &annotation.motifs[0];
+    let width = motif_width_of(&motif.tfbs)?;
+    let observed = compute_observed(
+        &motif.tfbs,
+        width,
+        annotation.enhancer.as_deref(),
+        &methylome.sites,
+        options.ignore_strand,
+        &motif.name,
+    )?;
+    let expected = compute_expectations(&motif.gcfreq, &bins)?;
+    let deviation = deviations(&observed, &expected);
+    Ok(CaseOutput {
+        sample: sample.id(),
+        motif: motif.name.clone(),
+        bins,
+        observed,
+        expected,
+        deviation,
+    })
+}
+
 /// Run every sample against the annotation, sequentially.
 ///
 /// Rows come out ordered by sample (argument order) then motif (manifest order).
 pub fn run(samples: &[Sample], annotation_dir: &Path, options: &Options) -> Result<Vec<Row>> {
-    let annotation = load_annotation(annotation_dir, options)?;
+    let (annotation, mut chroms) = load_annotation(annotation_dir, options)?;
     let motifs = valid_motifs(&annotation)?;
     let mut rows = Vec::with_capacity(samples.len() * motifs.len());
 
     for sample in samples {
         log(format!("Processing {}", sample.id()));
-        let methylome = load_sample(sample, options)?;
+        let methylome = load_sample(sample, options, &mut chroms)?;
         let bins = match gc_bins(&methylome, &annotation, options) {
             Ok(b) => b,
             Err(e) if options.keep_going => {
@@ -190,12 +241,15 @@ pub fn run(samples: &[Sample], annotation_dir: &Path, options: &Options) -> Resu
     Ok(rows)
 }
 
-/// Read one sample.
-pub fn load_sample(sample: &Sample, options: &Options) -> Result<Methylome> {
+/// Read one sample, interning its chromosome names into the run's table.
+pub fn load_sample(
+    sample: &Sample,
+    options: &Options,
+    chroms: &mut ChromTable,
+) -> Result<Methylome> {
     match &sample.format {
         InputFormat::Portable => {
-            let mut chroms = ChromTable::new();
-            let sites = read_msites(&sample.path, &mut chroms)?;
+            let sites = read_msites(&sample.path, chroms)?;
             // The portable form has already been through a methylome file, so
             // only the threshold applies here -- but the NaN drop is kept so the
             // two entry points agree on what a site is.
@@ -207,8 +261,7 @@ pub fn load_sample(sample: &Sample, options: &Options) -> Result<Methylome> {
             })
         }
         InputFormat::Methylome(ty) => {
-            let mut chroms = ChromTable::new();
-            read_methylome(&sample.path, ty, options.cov_threshold, &mut chroms)
+            read_methylome(&sample.path, ty, options.cov_threshold, chroms)
         }
     }
 }

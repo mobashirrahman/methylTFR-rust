@@ -185,10 +185,26 @@ add_gc_bins <- function(msites, gcdist, ignore_strand = TRUE) {
 # computeDeviation: resize every TFBS to width W about its centre, keep the
 # sites *within* a TFBS, and turn each hit into (x = site.start - midpoint,
 # value = site.score).
-compute_observed <- function(msites, tfbs, ignore_strand = TRUE, motif) {
+compute_observed <- function(msites, tfbs, ignore_strand = TRUE, motif, enhancer = NULL) {
     w <- (tfbs$end[1] - tfbs$start[1] + 1L) + 130L
     new_start <- tfbs$start + floor((tfbs$end - tfbs$start + 1L - w) / 2L)
     new_end <- new_start + w - 1L
+    # The enhancer filters the *resized* TFBS (section 2.6, step 2), not the
+    # originals: a binding site whose original coordinates miss the enhancer can
+    # still overlap it once it has been widened by about 130 bp.
+    if (!is.null(enhancer)) {
+        keep <- reduce(
+            data.frame(
+                chr = tfbs$chr, start = new_start, end = new_end,
+                strand = tfbs$strand,
+                stringsAsFactors = FALSE
+            ),
+            enhancer, ignore_strand
+        )
+        tfbs <- tfbs[keep, , drop = FALSE]
+        new_start <- new_start[keep]
+        new_end <- new_end[keep]
+    }
     mid <- round_half_even(
         as.numeric(new_end) + (as.numeric(new_start) - as.numeric(new_end)) / 2
     )
@@ -259,6 +275,21 @@ dev_helper <- function(x, value) {
     means[(k + 1L) %/% 2L] / ((means[1] + means[k]) / 2)
 }
 
+# A case's files are gzipped (`msites.tsv.gz` and friends) so that 200 of them fit
+# in a repository at the sizes the plan asks for. Every reader here sniffs the
+# content, not the name, so resolution is by trying the plain name first.
+resolve_case_file <- function(dir, name) {
+    plain <- file.path(dir, name)
+    if (file.exists(plain)) {
+        return(plain)
+    }
+    gz <- paste0(plain, ".gz")
+    if (file.exists(gz)) {
+        return(gz)
+    }
+    stop("case is missing ", plain, " or ", gz)
+}
+
 # ------------------------------------------------------------------- the run
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -272,8 +303,8 @@ if (!dir.exists(out_dir) && !dir.create(out_dir, recursive = TRUE)) {
     stop("could not create ", out_dir)
 }
 
-read_fixture <- function(name) {
-    d <- read_portable(file.path(fixture_dir, name))
+read_fixture <- function(path) {
+    d <- read_portable(path)
     for (col in c("start", "end")) {
         if (col %in% names(d)) {
             d[[col]] <- as.integer(d[[col]])
@@ -282,11 +313,11 @@ read_fixture <- function(name) {
     d
 }
 
-msites <- read_fixture("msites.tsv")
+msites <- read_fixture(resolve_case_file(fixture_dir, "msites.tsv"))
 msites$score <- as.numeric(msites$score)
-gcdist <- read_fixture("gc_windows.tsv")
+gcdist <- read_fixture(resolve_case_file(fixture_dir, "gc_windows.tsv"))
 gcdist$gc_bin <- as.integer(gcdist$gc_bin)
-motifs <- read_fixture("motifs.tsv")
+motifs <- read_fixture(resolve_case_file(fixture_dir, "motifs.tsv"))
 stopifnot(nrow(motifs) >= 1L)
 motif <- motifs$motif[[1]]
 
@@ -301,26 +332,56 @@ gcfreq <- as.matrix(
 )
 storage.mode(gcfreq) <- "double"
 
-ignore_strand <- TRUE
-opt_path <- file.path(fixture_dir, "options.tsv")
-if (file.exists(opt_path)) {
-    opts <- read_portable(opt_path)
-    if ("ignore_strand" %in% names(opts)) {
-        ignore_strand <- as.logical(opts$ignore_strand[[1]])
+# `options.tsv` carries `ignoreStrand`, with or without a header line. Kept
+# deliberately identical to reference_common.R's reader so the two oracles cannot
+# disagree about a case's settings.
+# The enhancer is optional, and its file may be plain or gzipped, so its presence
+# cannot be checked with a bare `file.exists` on the uncompressed name.
+case_file_or_null <- function(dir, name) {
+    plain <- file.path(dir, name)
+    if (file.exists(plain)) {
+        return(plain)
     }
+    gz <- paste0(plain, ".gz")
+    if (file.exists(gz)) {
+        return(gz)
+    }
+    NULL
 }
+
+read_ignore_strand <- function(path) {
+    if (!file.exists(path)) {
+        return(TRUE)
+    }
+    con <- file(path, "rt")
+    on.exit(close(con))
+    lines <- readLines(con, warn = FALSE)
+    lines <- lines[nzchar(lines)]
+    if (length(lines) == 0L) {
+        return(TRUE)
+    }
+    if (lines[[1]] == "ignore_strand") {
+        lines <- lines[-1]
+    }
+    if (length(lines) == 0L) {
+        return(TRUE)
+    }
+    as.logical(lines[[1]])
+}
+
+ignore_strand <- read_ignore_strand(file.path(fixture_dir, "options.tsv"))
 
 # AGENT_PLAN.md section 2.6: the enhancer reduces the GC windows once, before
 # any bin mean is computed, and filters the resized TFBS.
-enhancer_path <- file.path(fixture_dir, "enhancer.tsv")
-if (file.exists(enhancer_path)) {
-    enhancer <- read_fixture("enhancer.tsv")
+enhancer <- NULL
+enhancer_path <- case_file_or_null(fixture_dir, "enhancer.tsv")
+if (!is.null(enhancer_path)) {
+    enhancer <- read_fixture(enhancer_path)
     gcdist <- gcdist[reduce(gcdist, enhancer, ignore_strand), , drop = FALSE]
-    tfbs <- tfbs[reduce(tfbs, enhancer, ignore_strand), , drop = FALSE]
 }
 
 bins <- add_gc_bins(msites, gcdist, ignore_strand)
-observed <- compute_observed(msites, tfbs, ignore_strand, motif)
+observed <- compute_observed(msites, tfbs, ignore_strand, motif, enhancer)
 expected <- compute_expectations(gcfreq, bins$mean)
 
 obs_d <- dev_helper(observed$x, observed$value)

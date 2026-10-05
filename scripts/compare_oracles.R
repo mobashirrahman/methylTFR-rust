@@ -27,14 +27,31 @@ FILES <- c(
     "expected_profile.tsv", "expected_dev.tsv"
 )
 
+# The differential cases store their oracle outputs gzipped; the BATF fixtures do
+# not. Try the plain name and fall back to the gzip one.
+open_any <- function(path) {
+    if (file.exists(path)) {
+        con <- file(path, "rt")
+    } else if (file.exists(paste0(path, ".gz"))) {
+        con <- gzfile(paste0(path, ".gz"), "rt")
+    } else {
+        stop("missing ", path)
+    }
+    on.exit(close(con))
+    read.delim(
+        con, colClasses = "character",
+        check.names = FALSE, quote = "", comment.char = ""
+    )
+}
+
 worst_abs <- 0
 worst_rel <- 0
 worst_file <- NA_character_
 failed <- FALSE
 
 for (f in FILES) {
-    a <- utils::read.delim(file.path(dir_a, f), colClasses = "character")
-    b <- utils::read.delim(file.path(dir_b, f), colClasses = "character")
+    a <- open_any(file.path(dir_a, f))
+    b <- open_any(file.path(dir_b, f))
     if (!identical(dim(a), dim(b)) || !identical(names(a), names(b))) {
         cat(sprintf("%-22s SHAPE MISMATCH\n", f))
         failed <- TRUE
