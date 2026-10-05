@@ -12,8 +12,8 @@
 
 use crate::error::{Error, Result};
 use crate::expected::Profile;
-use crate::intervals::{Query, StartIndex, motif_width, resize_center};
-use crate::model::{GcFreq, Range, Site};
+use crate::intervals::{Query, StartIndex, Sweep, motif_width, resize_center};
+use crate::model::{GcFreq, Range, Site, SortedMethylome};
 use crate::rmath::{cut_index, round_half_even};
 
 /// The observed `(x, value)` pairs of one motif, before `dev_helper`.
@@ -64,6 +64,73 @@ pub fn compute_observed(
             let mid = crate::rmath::midpoint(tfbs.start, tfbs.end);
             x.push((s.start - mid) as f64);
             value.push(s.score);
+        }
+    }
+
+    if x.is_empty() {
+        return Err(Error::run(format!(
+            "No methylation sites found in the {motif} binding sites"
+        )));
+    }
+    Ok(Profile { x, value })
+}
+
+/// [`compute_observed`] over a pre-sorted methylome, using a two-pointer sweep
+/// instead of a binary search per site.
+///
+/// Same hits in the same order within a site (TFBS by ascending resized start),
+/// and the same fixed `x` and `value` values; only the order in which *sites* are
+/// visited differs when the input was not already sorted. See
+/// `docs/divergences.md` D4.
+pub fn compute_observed_swept(
+    tfbs: &[Range],
+    width: i64,
+    enhancer: Option<&[Range]>,
+    sites: &SortedMethylome,
+    ignore_strand: bool,
+    motif: &str,
+) -> Result<ObservedProfile> {
+    let resized = resize_center(tfbs, width);
+    let filtered: Vec<Range> = match enhancer {
+        None => resized,
+        Some(e) => {
+            let keep = crate::intervals::subset_by_overlaps(&resized, e, ignore_strand);
+            keep.iter()
+                .zip(resized.iter())
+                .filter(|(k, _)| **k)
+                .map(|(_, r)| *r)
+                .collect()
+        }
+    };
+    let index = StartIndex::build(&filtered);
+
+    let mut x = Vec::new();
+    let mut value = Vec::new();
+    for group in sites.groups() {
+        let chrom = sites.chrom(group);
+        let slice = index.slice_of(chrom.chr);
+        if slice.is_empty() {
+            continue;
+        }
+        let mut sweep = Sweep::new(&filtered, slice, width);
+        for i in 0..chrom.len() {
+            let s = chrom.starts[i];
+            let e = chrom.ends[i];
+            let site_strand = chrom.strand(i);
+            sweep.for_each_candidate(s, e, |t| {
+                let tfbs = filtered[t];
+                // Within: the resized TFBS must start at or before the site's
+                // start, and its uniform width W makes the other half of the test.
+                if tfbs.chr != chrom.chr || tfbs.start > s || tfbs.end < e {
+                    return;
+                }
+                if !tfbs.strand.compatible(site_strand, ignore_strand) {
+                    return;
+                }
+                let mid = crate::rmath::midpoint(tfbs.start, tfbs.end);
+                x.push((s - mid) as f64);
+                value.push(chrom.scores[i]);
+            });
         }
     }
 

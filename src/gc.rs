@@ -7,7 +7,8 @@
 //! windows contributes `k` terms to the sums.
 
 use crate::error::{Error, Result};
-use crate::intervals::{Query, StartIndex};
+use crate::intervals::{Query, StartIndex, Sweep};
+use crate::model::SortedMethylome;
 use crate::model::{GcWindow, Methylome, Site};
 
 /// The per-bin result of [`bin_means`], in ascending bin order, containing only
@@ -86,6 +87,75 @@ pub fn bin_means(
     Ok(GcBins { bin, mean, n_hits })
 }
 
+/// `addGCBintoMethylome` over a pre-sorted methylome, using a two-pointer sweep
+/// instead of a binary search per site.
+///
+/// Identical results to [`bin_means`] -- the same hits, the same fixed-size
+/// accumulators -- but `O(sites + windows + hits)` per chromosome rather than
+/// `O(sites * log windows)`. `tests/sweep_vs_search.rs` asserts the two agree
+/// hit for hit on adversarial input, because a sweep that quietly drops the last
+/// hit of a chromosome is the kind of bug the fixtures would not show.
+pub fn bin_means_swept(
+    methylome: &SortedMethylome,
+    windows: &[GcWindow],
+    index: &StartIndex,
+    ignore_strand: bool,
+) -> Result<GcBins> {
+    let mut sum = [0.0f64; 256];
+    let mut hits = [0u64; 256];
+    let mut any = false;
+
+    for group in methylome.groups() {
+        let sites = methylome.chrom(group);
+        let slice = index.slice_of(sites.chr);
+        if slice.is_empty() {
+            continue;
+        }
+        let max_width = index.max_width_of(sites.chr);
+        let mut sweep = Sweep::new(windows, slice, max_width);
+        for i in 0..sites.len() {
+            let s = sites.starts[i];
+            let e = sites.ends[i];
+            let site_strand = sites.strand(i);
+            sweep.for_each_candidate(s, e, |w| {
+                let win = &windows[w];
+                if win.chr != sites.chr || win.start > e || win.end < s {
+                    return;
+                }
+                if !win.strand.compatible(site_strand, ignore_strand) {
+                    return;
+                }
+                let bin = win.gc_bin as usize;
+                sum[bin] += sites.scores[i];
+                hits[bin] += 1;
+                any = true;
+            });
+        }
+    }
+
+    if !any {
+        return Err(Error::run(
+            "No methylation sites found in the GC distribution",
+        ));
+    }
+    Ok(collect(sum, hits))
+}
+
+/// Reduce the two accumulators into the ascending-bin-order result.
+fn collect(sum: [f64; 256], hits: [u64; 256]) -> GcBins {
+    let mut bin = Vec::new();
+    let mut mean = Vec::new();
+    let mut n_hits = Vec::new();
+    for (i, &n) in hits.iter().enumerate() {
+        if n > 0 {
+            bin.push(i as u8);
+            mean.push(sum[i] / n as f64);
+            n_hits.push(n);
+        }
+    }
+    GcBins { bin, mean, n_hits }
+}
+
 /// Reduce the GC windows to those overlapping at least one enhancer region
 /// (`AGENT_PLAN.md` section 2.6). Done once per run, before any bin mean, so the
 /// bin means themselves change with the enhancer.
@@ -100,6 +170,17 @@ pub fn reduce_windows_by_enhancer<E: crate::intervals::Interval>(
         .filter(|(k, _)| **k)
         .map(|(_, w)| *w)
         .collect()
+}
+
+/// [`bin_means_swept`] with a freshly built index.
+pub fn bin_means_swept_indexed(
+    sites: &[Site],
+    windows: &[GcWindow],
+    ignore_strand: bool,
+) -> Result<GcBins> {
+    let index = StartIndex::build(windows);
+    let sorted = SortedMethylome::new(sites);
+    bin_means_swept(&sorted, windows, &index, ignore_strand)
 }
 
 /// Convenience wrapper: build the index and compute the means.

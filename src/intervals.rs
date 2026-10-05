@@ -278,6 +278,27 @@ impl StartIndex {
         self.group_chr.get(slot).copied()
     }
 
+    /// The widest range on a chromosome, which bounds how far back a sweep must
+    /// look. `0` for a chromosome with no ranges.
+    pub fn max_width_of(&self, chr: u32) -> i64 {
+        self.chr_slot(chr).map_or(0, |c| self.max_width[c])
+    }
+
+    /// One chromosome's ranges, in ascending start order, as the original indices.
+    pub fn slice_of(&self, chr: u32) -> &[u32] {
+        match self.chr_slot(chr) {
+            Some(c) => self.slice(c),
+            None => &[],
+        }
+    }
+
+    /// The private per-chromosome slice, by group index.
+    #[inline]
+    fn slice(&self, slot: usize) -> &[u32] {
+        let start = self.offsets[slot];
+        &self.order[slot][..self.offsets[slot + 1] - start]
+    }
+
     /// `findOverlaps(site, ranges, type = "any")`: every range overlapping
     /// `[start, end]`, in ascending start order.
     pub fn any_overlaps<'a, T: Interval>(
@@ -590,6 +611,83 @@ pub fn site_windows<'a, T: Interval>(
     ignore_strand: bool,
 ) -> OverlapIter<'a, T> {
     index.any_overlaps(ranges, Query::from_site(site, ignore_strand))
+}
+
+/// A forward-only cursor pair over one chromosome's start-sorted ranges of any
+/// [`Interval`] type.
+///
+/// This is what replaces the per-site binary search in the two hot loops
+/// (`docs/AGENT_PLAN.md` M7 T72). Both bounds advance monotonically as the sites
+/// advance, so the whole chromosome costs `O(sites + ranges + hits)` instead of
+/// `O(sites * log ranges)`.
+///
+/// The bounds are deliberately *supersets*. `hi` runs to the largest end seen so
+/// far on this chromosome rather than to the current site's end, because sites
+/// sorted by start can have ends out of order (a wide site followed by a narrow one
+/// at a nearby position). The caller still tests `range.start <= site.end`, so a
+/// superset costs nothing but a comparison and cannot change the answer.
+pub struct Sweep<'a, T> {
+    slice: &'a [u32],
+    ranges: &'a [T],
+    /// First index whose start can still reach the current site.
+    lo: usize,
+    /// One past the last index whose start is within the running maximum end.
+    hi: usize,
+    /// Largest end seen so far, used to keep `hi` monotone.
+    running_end: i64,
+    /// The widest range on this chromosome, which bounds the lower edge.
+    max_width: i64,
+}
+
+impl<'a, T: Interval> Sweep<'a, T> {
+    /// `max_width` is the widest range on this chromosome, normally taken from
+    /// [`StartIndex::max_width_of`].
+    pub fn new(ranges: &'a [T], slice: &'a [u32], max_width: i64) -> Self {
+        Self {
+            slice,
+            ranges,
+            lo: 0,
+            hi: 0,
+            running_end: i64::MIN,
+            max_width,
+        }
+    }
+
+    /// Advance to site `[start, end]`, calling `f` for every index in the
+    /// candidate slice. The caller does the real filtering.
+    #[inline]
+    pub fn for_each_candidate<F: FnMut(usize)>(&mut self, start: i64, end: i64, mut f: F) {
+        if end > self.running_end {
+            self.running_end = end;
+        }
+        // `lo`: a range reaching `start` must start at or after `start - width + 1`
+        // for its own width, so no range starting before `start - max_width + 1`
+        // can reach it.
+        let lo_bound = start.saturating_sub(self.max_width - 1);
+        while self.lo < self.hi {
+            let r = &self.ranges[self.slice[self.lo] as usize];
+            if r.start_pos() < lo_bound {
+                self.lo += 1;
+            } else {
+                break;
+            }
+        }
+        // `hi`: ranges starting at or before the running maximum end.
+        while self.hi < self.slice.len() {
+            let r = &self.ranges[self.slice[self.hi] as usize];
+            if r.start_pos() <= self.running_end {
+                self.hi += 1;
+            } else {
+                break;
+            }
+        }
+        if self.lo > self.hi {
+            self.lo = self.hi;
+        }
+        for k in self.lo..self.hi {
+            f(self.slice[k] as usize);
+        }
+    }
 }
 
 /// Brute-force `type = "any"` overlap set, for the differential test in

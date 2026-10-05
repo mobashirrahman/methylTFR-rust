@@ -281,3 +281,302 @@ mod tests {
         assert!(GcFreq::new(2, 3, vec![0.0; 6]).is_ok());
     }
 }
+
+/// The methylome as the hot loops want it: grouped by chromosome, sorted by
+/// start, in struct-of-arrays form.
+///
+/// Two reasons, both from `AGENT_PLAN.md` M7 T72:
+///
+/// * **Sorted once.** A methylation file is usually already in coordinate order,
+///   but it is not guaranteed to be, and every consumer of the sample would
+///   otherwise have to establish that itself. Sorting here is done once per
+///   sample.
+/// * **Struct of arrays.** `starts` is the array a sweep walks; `scores` is the
+///   array a hit reads. Keeping them apart means the sweep's inner loop touches
+///   one contiguous `i64` array rather than striding over 32-byte structs, and it
+///   drops `coverage`, which nothing below this point still needs.
+///
+/// Consequence to be explicit about: hits are now visited in sorted order rather
+/// than input order, so a sum over many hits can differ from the same sum taken in
+/// input order in its last bit. Every committed fixture is already sorted, so
+/// their output is unchanged; see `docs/divergences.md` D4 for the measured size
+/// of the difference on unsorted input.
+#[derive(Clone, Debug)]
+pub struct SortedMethylome {
+    starts: Vec<i64>,
+    ends: Vec<i64>,
+    strands: Vec<u8>,
+    scores: Vec<f64>,
+    /// One entry per chromosome, in ascending chromosome id, each a half-open
+    /// range into the arrays above.
+    groups: Vec<ChromGroup>,
+    len: usize,
+}
+
+/// The sites of one chromosome, borrowed.
+#[derive(Clone, Copy, Debug)]
+pub struct ChromGroup {
+    pub chr: u32,
+    pub begin: usize,
+    pub end: usize,
+}
+
+/// Borrowed struct-of-arrays view of one chromosome's sites.
+#[derive(Clone, Copy, Debug)]
+pub struct ChromSites<'a> {
+    pub chr: u32,
+    pub starts: &'a [i64],
+    pub ends: &'a [i64],
+    pub strands: &'a [u8],
+    pub scores: &'a [f64],
+}
+
+impl ChromSites<'_> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.starts.is_empty()
+    }
+
+    #[inline]
+    pub fn strand(&self, i: usize) -> Strand {
+        match self.strands[i] {
+            1 => Strand::Plus,
+            2 => Strand::Minus,
+            _ => Strand::Star,
+        }
+    }
+}
+
+impl SortedMethylome {
+    /// Group and sort a methylome. Stable, so equal (start, end) pairs keep their
+    /// input order and a pre-sorted input comes out byte-identical.
+    pub fn new(sites: &[Site]) -> Self {
+        let mut order: Vec<u32> = (0..sites.len()).map(|i| i as u32).collect();
+        order.sort_by_key(|&i| {
+            let s = &sites[i as usize];
+            (s.chr, s.start, s.end)
+        });
+
+        let len = sites.len();
+        let mut starts = Vec::with_capacity(len);
+        let mut ends = Vec::with_capacity(len);
+        let mut strands = Vec::with_capacity(len);
+        let mut scores = Vec::with_capacity(len);
+        for &i in &order {
+            let s = &sites[i as usize];
+            starts.push(s.start);
+            ends.push(s.end);
+            strands.push(match s.strand {
+                Strand::Plus => 1u8,
+                Strand::Minus => 2,
+                Strand::Star => 0,
+            });
+            scores.push(s.score);
+        }
+
+        // One group per run of equal chromosome ids in the sorted order.
+        let mut groups: Vec<ChromGroup> = Vec::new();
+        let mut run_start = 0usize;
+        // From the *sorted* order, not from `sites[0]`: the input may start on any
+        // chromosome.
+        let mut run_chr = order.first().map(|&i| sites[i as usize].chr);
+        for (i, &idx) in order.iter().enumerate() {
+            let c = sites[idx as usize].chr;
+            if Some(c) != run_chr {
+                groups.push(ChromGroup {
+                    chr: run_chr.unwrap_or(c),
+                    begin: run_start,
+                    end: i,
+                });
+                run_start = i;
+                run_chr = Some(c);
+            }
+        }
+        if len > 0 {
+            groups.push(ChromGroup {
+                chr: run_chr.unwrap_or_default(),
+                begin: run_start,
+                end: len,
+            });
+        }
+
+        Self {
+            starts,
+            ends,
+            strands,
+            scores,
+            groups,
+            len,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// One entry per chromosome, ascending by chromosome id.
+    pub fn groups(&self) -> &[ChromGroup] {
+        &self.groups
+    }
+
+    /// The group for `chr`, if the methylome has any site on it.
+    pub fn group(&self, chr: u32) -> Option<&ChromGroup> {
+        self.groups
+            .binary_search_by_key(&chr, |g| g.chr)
+            .ok()
+            .map(|i| &self.groups[i])
+    }
+
+    /// Borrow one chromosome's sites.
+    pub fn chrom(&self, g: &ChromGroup) -> ChromSites<'_> {
+        ChromSites {
+            chr: g.chr,
+            starts: &self.starts[g.begin..g.end],
+            ends: &self.ends[g.begin..g.end],
+            strands: &self.strands[g.begin..g.end],
+            scores: &self.scores[g.begin..g.end],
+        }
+    }
+
+    /// The sites of `chr`, or an empty view when there are none.
+    pub fn chrom_by_id(&self, chr: u32) -> ChromSites<'_> {
+        match self.group(chr) {
+            Some(g) => self.chrom(g),
+            None => ChromSites {
+                chr,
+                starts: &[],
+                ends: &[],
+                strands: &[],
+                scores: &[],
+            },
+        }
+    }
+
+    /// The group order's chromosome ids, for iterating the annotation side too.
+    pub fn chromosome_ids(&self) -> Vec<u32> {
+        self.groups.iter().map(|g| g.chr).collect()
+    }
+}
+
+#[cfg(test)]
+mod sorted_tests {
+    use super::*;
+
+    fn site(chr: u32, start: i64, end: i64, score: f64) -> Site {
+        Site {
+            chr,
+            start,
+            end,
+            strand: Strand::Star,
+            score,
+            coverage: 1.0,
+        }
+    }
+
+    #[test]
+    fn groups_and_sorts_by_chromosome_then_start() {
+        let sites = vec![
+            site(1, 50, 51, 0.5),
+            site(0, 10, 11, 0.1),
+            site(1, 10, 11, 0.2),
+            site(0, 20, 21, 0.3),
+        ];
+        let m = SortedMethylome::new(&sites);
+        assert_eq!(m.len(), 4);
+        assert_eq!(
+            m.groups().iter().map(|g| g.chr).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let c0 = m.chrom_by_id(0);
+        assert_eq!(c0.len(), 2);
+        assert_eq!(c0.starts, &[10, 20]);
+        assert_eq!(c0.scores, &[0.1, 0.3]);
+        let c1 = m.chrom_by_id(1);
+        assert_eq!(c1.starts, &[10, 50]);
+        assert_eq!(c1.scores, &[0.2, 0.5]);
+    }
+
+    #[test]
+    fn a_missing_chromosome_is_an_empty_view_not_a_panic() {
+        let m = SortedMethylome::new(&[site(0, 1, 2, 1.0)]);
+        assert!(m.chrom_by_id(7).is_empty());
+        assert!(m.group(7).is_none());
+        assert_eq!(m.group(0).map(|g| g.chr), Some(0));
+    }
+
+    #[test]
+    fn an_empty_methylome_has_no_groups() {
+        let m = SortedMethylome::new(&[]);
+        assert!(m.is_empty());
+        assert!(m.groups().is_empty());
+        assert_eq!(m.chromosome_ids(), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn an_already_sorted_input_keeps_its_order() {
+        let sites: Vec<Site> = (0..100)
+            .map(|i| site(0, i * 10, i * 10 + 1, i as f64))
+            .collect();
+        let m = SortedMethylome::new(&sites);
+        let chrom = m.chrom_by_id(0);
+        assert_eq!(chrom.len(), sites.len());
+        for (i, s) in sites.iter().enumerate() {
+            assert_eq!(chrom.starts[i], s.start);
+            assert_eq!(chrom.scores[i].to_bits(), s.score.to_bits());
+        }
+    }
+
+    #[test]
+    fn equal_coordinates_keep_input_order() {
+        // Three identical coordinates with different scores: the order matters for
+        // the f64 sum, so stability is a requirement, not a nicety.
+        let sites = vec![site(0, 5, 6, 0.1), site(0, 5, 6, 0.2), site(0, 5, 6, 0.3)];
+        let m = SortedMethylome::new(&sites);
+        let c = m.chrom_by_id(0);
+        assert_eq!(c.scores, &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn strands_round_trip_through_the_byte_encoding() {
+        let sites = vec![
+            Site {
+                chr: 0,
+                start: 1,
+                end: 1,
+                strand: Strand::Plus,
+                score: 0.0,
+                coverage: 0.0,
+            },
+            Site {
+                chr: 0,
+                start: 2,
+                end: 2,
+                strand: Strand::Minus,
+                score: 0.0,
+                coverage: 0.0,
+            },
+            Site {
+                chr: 0,
+                start: 3,
+                end: 3,
+                strand: Strand::Star,
+                score: 0.0,
+                coverage: 0.0,
+            },
+        ];
+        let m = SortedMethylome::new(&sites);
+        let c = m.chrom_by_id(0);
+        assert_eq!(c.strand(0), Strand::Plus);
+        assert_eq!(c.strand(1), Strand::Minus);
+        assert_eq!(c.strand(2), Strand::Star);
+    }
+}

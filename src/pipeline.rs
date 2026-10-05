@@ -18,14 +18,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::deviation::{Deviation, compute_observed, deviations, motif_width_of};
+use rayon::prelude::*;
+
+use crate::deviation::{
+    Deviation, compute_observed, compute_observed_swept, deviations, motif_width_of,
+};
 use crate::error::{Error, Result};
 use crate::expected::{Profile, compute_expectations};
-use crate::gc::{GcBins, bin_means, reduce_windows_by_enhancer};
+use crate::gc::{GcBins, bin_means_swept, reduce_windows_by_enhancer};
 use crate::intervals::StartIndex;
 use crate::io::methylome::read_methylome;
 use crate::io::portable::{read_annotation, read_msites};
-use crate::model::{Annotation, ChromTable, Methylome, MotifAnnotation, Site};
+use crate::model::{Annotation, ChromTable, Methylome, MotifAnnotation, Site, SortedMethylome};
 
 /// How one sample file should be read.
 #[derive(Clone, Debug)]
@@ -166,14 +170,16 @@ pub fn run_case(
     chroms: &mut ChromTable,
 ) -> Result<CaseOutput> {
     let methylome = load_sample(sample, options, chroms)?;
+    // Sort once per sample, here, rather than in each consumer.
+    let sorted = SortedMethylome::new(&methylome.sites);
     let bins = gc_bins(&methylome, annotation, options)?;
     let motif = &annotation.motifs[0];
     let width = motif_width_of(&motif.tfbs)?;
-    let observed = compute_observed(
+    let observed = compute_observed_swept(
         &motif.tfbs,
         width,
         annotation.enhancer.as_deref(),
-        &methylome.sites,
+        &sorted,
         options.ignore_strand,
         &motif.name,
     )?;
@@ -217,17 +223,39 @@ pub fn run(samples: &[Sample], annotation_dir: &Path, options: &Options) -> Resu
             Err(e) => return Err(e),
         };
 
-        for &i in &motifs {
-            let motif = &annotation.motifs[i];
-            match compute_cell(&methylome, &annotation, motif, &bins, options) {
-                Ok(mut row) => {
-                    row.sample = sample.id();
-                    rows.push(row);
-                }
+        // Over motifs, never inside one (M7 T73). Two properties make this safe:
+        //
+        // * `compute_cell` reads only `methylome`, `annotation` and `bins`, and
+        //   writes to nothing shared, so the cells are independent.
+        // * `par_iter().map(..).collect()` preserves the input order, so the rows
+        //   come out in manifest order regardless of thread count. Each motif's
+        //   internal f64 reductions are untouched, because nothing inside a cell
+        //   is parallel -- so the numbers are identical for 1 thread and for 16,
+        //   not merely close.
+        //
+        // The error case is the awkward one: the sequential build aborts the whole
+        // run on the first failure, so the error is collected here and raised
+        // after the fact rather than inside the parallel closure, which cannot
+        // return a `Result` without paying for one per motif.
+        let sample_id = sample.id();
+        let outcomes: Vec<Result<Row>> = motifs
+            .par_iter()
+            .map(|&i| {
+                let motif = &annotation.motifs[i];
+                compute_cell(&methylome, &annotation, motif, &bins, options).map(|mut row| {
+                    row.sample = sample_id.clone();
+                    row
+                })
+            })
+            .collect();
+        for (i, outcome) in outcomes.into_iter().enumerate() {
+            let motif = &annotation.motifs[motifs[i]];
+            match outcome {
+                Ok(row) => rows.push(row),
                 Err(e) if options.keep_going => {
-                    log(format!("keep-going: {} {}: {e}", sample.id(), motif.name));
+                    log(format!("keep-going: {} {}: {e}", sample_id, motif.name));
                     rows.push(Row {
-                        sample: sample.id(),
+                        sample: sample_id.clone(),
                         motif: motif.name.clone(),
                         deviation: None,
                         expected_deviation: None,
@@ -236,7 +264,7 @@ pub fn run(samples: &[Sample], annotation_dir: &Path, options: &Options) -> Resu
                 Err(e) => return Err(e),
             }
         }
-        log(format!("Finished processing {}", sample.id()));
+        log(format!("Finished processing {}", sample_id));
     }
     Ok(rows)
 }
@@ -311,14 +339,19 @@ pub fn run_in_memory(
 }
 
 /// GC bin means for one sample, using the (already enhancer-reduced) windows.
+///
+/// The window index is built once and reused for every motif, which is the point:
+/// at genome scale it is millions of entries and building it per motif would cost
+/// more than the whole rest of the run.
 pub fn gc_bins(
     methylome: &Methylome,
     annotation: &Annotation,
     options: &Options,
 ) -> Result<GcBins> {
     let index = StartIndex::build(&annotation.gc_windows);
-    bin_means(
-        &methylome.sites,
+    let sorted = SortedMethylome::new(&methylome.sites);
+    bin_means_swept(
+        &sorted,
         &annotation.gc_windows,
         &index,
         options.ignore_strand,
