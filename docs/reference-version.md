@@ -66,22 +66,127 @@ row, so "manifest order" (plan 2.8) is the same order.
 
 ## R used for the Tier A / Tier B oracles
 
+Two R installations are used, and it matters which script needs which.
+
+**Tier B** (`scripts/reference_base.R`, `scripts/gen_rmath_tables.R`,
+`scripts/gen_differential_cases.R` helpers) is base R only, so it runs on the
+system R with no extra packages:
+
 ```
 R version 4.3.3 (2024-02-29) -- "Angel Food Cake"
 Copyright (C) 2024 The R Foundation for Statistical Computing
 platform: x86_64-pc-linux-gnu
 ```
 
-`sessionInfo()` of the R installation that ran the oracle scripts will be
-appended below by task T02, once Bioconductor is installed into `R_LIBS_USER`
-and `methylTFR` itself is installed from `reference/methylTFR`. Until that
-exists, only the Tier B (base-R) oracle can be run; CI is Rust-only and never
-starts R.
+**Tier A** (`scripts/run_reference.R`, `scripts/export_reference_data.R` on the
+`.rda` route, and the T02/T04/T50 oracles) needs Bioconductor 3.18, so it runs
+in a micromamba environment (`T02`) rather than in the system library: the box
+has no `sudo`, and its system R is missing the development headers
+(`libcurl4-openssl-dev`, `libxml2-dev`, `libhdf5-dev`) that a from-source
+Bioconductor build needs.
+
+- micromamba 2.9.0, `MAMBA_ROOT_PREFIX=/scratch/mdra00001/micromamba`
+- environment `methyltfr-ref`, channel `conda-forge` only
+- outside the repository, so nothing in `.gitignore` has to cover it
+
+Recreate it:
+
+```sh
+curl -sSL https://micro.mamba.pm/api/micromamba/linux-64/latest \
+  | tar -xj bin/micromamba
+export MAMBA_ROOT_PREFIX=/scratch/mdra00001/micromamba
+micromamba create -y -n methyltfr-ref -c conda-forge --strict-channel-priority \
+  r-base=4.3 \
+  bioconductor-genomicranges bioconductor-iranges bioconductor-s4vectors \
+  bioconductor-summarizedexperiment bioconductor-biocparallel \
+  bioconductor-delayedarray bioconductor-hdf5array \
+  r-data.table r-r.utils r-logger r-matrixstats r-stringr r-ggplot2
+micromamba run -n methyltfr-ref R CMD INSTALL reference/methylTFR
+```
+
+Resolved versions of the packages the plan names, which together identify
+Bioconductor 3.18 (the release series for R 4.3):
+
+| plan | package | version |
+|---|---|---|
+| — | `r-base` | 4.3.3 |
+| `GenomicRanges` | GenomicRanges | 1.54.1 |
+| `IRanges` | IRanges | 2.36.0 |
+| `S4Vectors` | S4Vectors | 0.40.2 |
+| `SummarizedExperiment` | SummarizedExperiment | 1.32.0 |
+| `BiocParallel` | BiocParallel | 1.36.0 |
+| `DelayedArray` | DelayedArray | 0.28.0 |
+| `HDF5Array` | HDF5Array | 1.30.0 |
+| — | BiocGenerics | 0.48.1 |
+| — | GenomeInfoDb | 1.38.1 |
+| — | rhdf5 | 2.46.1 |
+| `data.table` | data.table | 1.17.8 |
+| `R.utils` | R.utils | 2.13.0 |
+| `logger` | logger | 0.4.0 |
+| `matrixStats` | matrixStats | 1.5.0 |
+| `stringr` | stringr | 1.5.2 |
+| `ggplot2` | ggplot2 | 3.5.2 |
+| — | methylTFR | 0.99.9 (installed from the pinned clone) |
+
+`data.table` resolves to 1.17.8 here, not the CRAN head, because `r-base=4.3`
+pins the whole conda-forge dependency closure; upstream only requires
+`>= 1.14.0`, so the pin is not a source of divergence.
+
+### `sessionInfo()` of the Tier A environment
+
+```
+R version 4.3.3 (2024-02-29)
+Platform: x86_64-conda-linux-gnu (64-bit)
+Running under: Ubuntu 24.04.5 LTS
+
+Matrix products: default
+BLAS/LAPACK: /scratch/mdra00001/micromamba/envs/methyltfr-ref/lib/libopenblasp-r0.3.34.so;  LAPACK version 3.12.0
+
+locale:
+ [1] LC_CTYPE=C.UTF-8       LC_NUMERIC=C           LC_TIME=C.UTF-8
+ [4] LC_COLLATE=C.UTF-8     LC_MONETARY=C.UTF-8    LC_MESSAGES=C.UTF-8
+ [7] LC_PAPER=C.UTF-8       LC_NAME=C              LC_ADDRESS=C
+[10] LC_TELEPHONE=C         LC_MEASUREMENT=C.UTF-8 LC_IDENTIFICATION=C
+
+time zone: Europe/Berlin
+tzcode source: system (glibc)
+
+attached base packages:
+[1] stats4    stats     graphics  grDevices utils     datasets  methods
+[8] base
+
+other attached packages:
+ [1] methylTFR_0.99.9            SummarizedExperiment_1.32.0
+ [3] Biobase_2.62.0              GenomicRanges_1.54.1
+ [5] GenomeInfoDb_1.38.1         IRanges_2.36.0
+ [7] S4Vectors_0.40.2            BiocGenerics_0.48.1
+ [9] MatrixGenerics_1.14.0       matrixStats_1.5.0
+[11] data.table_1.17.8
+
+loaded via a namespace (and not attached):
+ [1] SparseArray_1.2.2       bitops_1.0-9            stringi_1.8.7
+ [4] lattice_0.22-7          magrittr_2.0.3          grid_4.3.3
+ [7] RColorBrewer_1.1-3      R.oo_1.27.1             Matrix_1.6-5
+[10] R.utils_2.13.0          scales_1.4.0            HDF5Array_1.30.0
+[13] codetools_0.2-20        abind_1.4-5             cli_3.6.5
+[16] rlang_1.1.6             crayon_1.5.3            XVector_0.42.0
+[19] R.methodsS3_1.8.2       DelayedArray_0.28.0     S4Arrays_1.2.0
+[22] tools_4.3.3             parallel_4.3.3          BiocParallel_1.36.0
+[25] Rhdf5lib_1.24.0         ggplot2_3.5.2           GenomeInfoDbData_1.2.11
+[28] vctrs_0.6.5             logger_0.4.0            R6_2.6.1
+[31] rhdf5_2.46.1            lifecycle_1.0.4         zlibbioc_1.48.0
+[34] stringr_1.5.2           pkgconfig_2.0.3         pillar_1.11.0
+[37] gtable_0.3.6            glue_1.8.0              tibble_3.3.0
+[40] rhdf5filters_1.14.1     farver_2.1.2            compiler_4.3.3
+[43] RCurl_1.98-1.17
+```
+
+CI remains Rust-only and never starts R.
 
 ## Attestation
 
 The `[verified]` markers in `AGENT_PLAN.md` section 2.1 and 2.7 were confirmed
-on this R 4.3.3. The `[confirm-A]` markers (strand validation in
-`read_methylome`, and the resize/midpoint rules being strand-independent) are
-source-reading conclusions only and remain open until Tier A (T04) and the
-differential cases (T50/T51) run.
+on R 4.3.3. The `[confirm-A]` markers (strand validation in `read_methylome`,
+and the resize/midpoint rules being strand-independent) are source-reading
+conclusions only; the Tier A environment documented above now exists, so they
+close as soon as T04 and the differential cases (T50/T51) run against it.
