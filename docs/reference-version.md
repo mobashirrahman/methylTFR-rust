@@ -190,3 +190,57 @@ on R 4.3.3. The `[confirm-A]` markers (strand validation in `read_methylome`,
 and the resize/midpoint rules being strand-independent) are source-reading
 conclusions only; the Tier A environment documented above now exists, so they
 close as soon as T04 and the differential cases (T50/T51) run against it.
+
+### Closed `[confirm-A]` markers
+
+Both markers `AGENT_PLAN.md` section 2 left for the Tier A oracle have been
+closed by running methylTFR 0.99.9 itself; the plan text stays as written, but
+the behaviour below is now observed rather than read.
+
+| marker | how it was closed | observed behaviour |
+|---|---|---|
+| 2.2, strand validation | `read_methylome()` on a one-line EPP file whose 6th column is `.`, then `x`, then `+` | `strand values must be in '+' '-' '*'` for both `.` and `x`; `+` succeeds. Strand `*` is accepted, so a Rust reader that rejects anything outside `{+, -, *}` is faithful. |
+| 2.4, resize and midpoint are strand-independent | `identical()` between `resize(tfbs, W, fix = "center")` and the plan's formula `new_start = start + floor((width - W) / 2)`, `new_end = new_start + W - 1` over all 268 717 BATF TFBS, then `findOverlaps(..., type = "within", ignore.strand = FALSE)` | starts identical for every TFBS, ends differ from the plan's formula by 0 for every TFBS (all resized widths are exactly 541), and `findOverlaps` with `ignore.strand = FALSE` returns 29 hits -- the same count as with strand ignored, because the fixture's sites and resized TFBS agree in this subset. The resize never reads `strand`. |
+
+## T04 oracle agreement
+
+`scripts/compare_oracles.R` compares the two committed oracle outputs:
+
+```
+$ Rscript scripts/compare_oracles.R tests/fixtures/batf/expected tests/fixtures/batf/expected_tierB
+expected_bins.tsv         5 rows  max abs 2.220e-16  max rel 2.833e-16  ok
+observed_profile.tsv     29 rows  max abs 0.000e+00  max rel 0.000e+00  ok
+expected_profile.tsv   512 rows  max abs 2.220e-16  max rel 3.208e-16  ok
+expected_dev.tsv         1 rows  max abs 2.220e-16  max rel 2.266e-16  ok
+tests/fixtures/batf/expected vs tests/fixtures/batf/expected_tierB: worst abs 2.220e-16 (expected_bins.tsv), worst rel 3.208e-16, tolerance 1.0e-10 -- PASS
+
+$ Rscript scripts/compare_oracles.R tests/fixtures/batf_1d99721/expected tests/fixtures/batf_1d99721/expected_tierB
+expected_bins.tsv         5 rows  max abs 2.220e-16  max rel 2.833e-16  ok
+observed_profile.tsv     29 rows  max abs 0.000e+00  max rel 0.000e+00  ok
+expected_profile.tsv   512 rows  max abs 3.331e-16  max rel 4.854e-16  ok
+expected_dev.tsv         1 rows  max abs 2.220e-16  max rel 2.257e-16  ok
+tests/fixtures/batf_1d99721/expected vs tests/fixtures/batf_1d99721/expected_tierB: worst abs 3.331e-16 (expected_profile.tsv), worst rel 4.854e-16, tolerance 1.0e-10 -- PASS
+```
+
+The two oracles are not bit-identical and cannot be: R's `mean()` accumulates in
+long double and `%*%` runs through BLAS, while the Tier B loops sum in `f64`.
+`observed_profile.tsv` -- the only file with no accumulation in it, because every
+value is copied straight out of a site -- is byte-identical. The worst
+disagreement anywhere is 3.3e-16, six orders of magnitude below the 1e-10 the
+plan requires.
+
+### Golden values (AGENT_PLAN.md section 4), recomputed
+
+`tests/fixtures/batf_1d99721/expected_tierB/expected_dev.tsv` reproduces the
+published pkgdown column to all 7 printed digits:
+
+```
+motif	obs_d	exp_d	dev
+BATF	2.7272727272727271	0.98359851852227742	1.7436742087504498
+```
+
+which is `dev = 1.743674` and `exp_dev = 0.9835985`, and the Tier A oracle
+agrees. `tests/fixtures/batf/expected/expected_dev.tsv` reproduces the
+provisional pinned-SHA column, `obs_d = 2.7272727`, `exp_dev = 0.9798459`,
+`dev = 1.7474268`, again with Tier A agreeing, so the provisional column is
+confirmed rather than merely unrefuted.
