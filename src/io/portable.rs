@@ -80,6 +80,27 @@ fn resolve(dir: &Path, p: &str) -> PathBuf {
     }
 }
 
+/// Resolve `<name>` or `<name>.gz` inside `dir`, whichever exists.
+///
+/// Section 3 spells the annotation files `gc_windows.tsv[.gz]`, so the gzip variant
+/// is part of the format, not an optional extra: a fixture directory may hold
+/// either.
+pub fn resolve_existing(dir: &Path, name: &str) -> Result<PathBuf> {
+    let plain = dir.join(name);
+    if plain.exists() {
+        return Ok(plain);
+    }
+    let gz = dir.join(format!("{name}.gz"));
+    if gz.exists() {
+        return Ok(gz);
+    }
+    Err(Error::Missing(format!(
+        "{} or {}",
+        plain.display(),
+        gz.display()
+    )))
+}
+
 /// Read `msites.tsv` into a methylome.
 pub fn read_msites(path: &Path, chroms: &mut ChromTable) -> Result<Vec<Site>> {
     let mut lines = read_lines(path)?;
@@ -253,8 +274,8 @@ pub fn read_annotation(
     ignore_strand: bool,
     chroms: &mut ChromTable,
 ) -> Result<crate::model::Annotation> {
-    let manifest = dir.join("motifs.tsv");
-    let windows = dir.join("gc_windows.tsv");
+    let manifest = resolve_existing(dir, "motifs.tsv")?;
+    let windows = resolve_existing(dir, "gc_windows.tsv")?;
     let gc_windows = read_gc_windows(&windows, chroms)?;
 
     // Two manifest rows may name the same TFBS file (the CLI integration test

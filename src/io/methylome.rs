@@ -432,3 +432,103 @@ mod tests {
         assert!(e.to_string().contains("nonexistent"));
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp(name: &str, body: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("methyltfr-dispatch-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    fn n(path: &std::path::Path, ty: &str, thr: f64) -> Result<usize> {
+        let mut chroms = ChromTable::new();
+        read_methylome(path, ty, thr, &mut chroms).map(|m| m.sites.len())
+    }
+
+    #[test]
+    fn type_names_are_matched_case_insensitively() {
+        // Upstream does `tolower(type)`, so "EPP" and "epp" are the same reader.
+        let p = tmp("case.tsv", "chr1\t10\t11\t1/2\t500\t+\n");
+        for ty in ["epp", "EPP", "Epp", "ePp"] {
+            assert_eq!(n(&p, ty, 1.0).unwrap(), 1, "type {ty}");
+        }
+        assert!(n(&p, " epp", 1.0).is_err(), "leading space is not trimmed");
+    }
+
+    #[test]
+    fn every_accepted_type_is_dispatchable() {
+        // The list and the `match` must not drift apart.
+        for ty in TYPES {
+            let p = tmp("dispatch.tsv", "");
+            let r = n(&p, ty, 1.0);
+            // Empty input is either an error or zero records depending on the
+            // format's column check; what matters is that it is not "not a valid
+            // file type".
+            if let Err(e) = r {
+                assert!(
+                    !e.to_string().contains("not a valid file type"),
+                    "{ty}: {e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn thresholds_zero_one_and_twenty() {
+        let body = "chr1\t10\t11\t1/10\t1000\t+\n\
+                    chr1\t12\t13\t5/20\t1000\t-\n\
+                    chr1\t14\t15\t30/100\t1000\t+\n";
+        let p = tmp("thr.tsv", body);
+        // Coverages are the denominators: 10, 20 and 100.
+        assert_eq!(n(&p, "epp", 0.0).unwrap(), 3);
+        assert_eq!(n(&p, "epp", 1.0).unwrap(), 3, "all three reach coverage 1");
+        assert_eq!(n(&p, "epp", 10.0).unwrap(), 3, "10 >= 10");
+        assert_eq!(n(&p, "epp", 10.5).unwrap(), 2);
+        assert_eq!(n(&p, "epp", 20.0).unwrap(), 2);
+        assert_eq!(n(&p, "epp", 21.0).unwrap(), 1, "coverage 100 only");
+        assert_eq!(n(&p, "epp", 100.0).unwrap(), 1);
+        assert_eq!(n(&p, "epp", 1000.0).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_score_outside_zero_to_one_is_an_error() {
+        // A bismarkCov file whose percentages exceed 100 gives scores above 1.
+        let p = tmp(
+            "range.tsv",
+            "chr1\t10\t11\t250\t1\t1\nchr1\t12\t13\t300\t1\t1\n",
+        );
+        let e = n(&p, "bismarkcov", 1.0).unwrap_err();
+        assert!(e.to_string().contains("which is not a fraction"), "{e}");
+        assert!(
+            e.to_string().contains("'bismarkcov' is the right format"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn the_range_check_only_sees_surviving_records() {
+        // The offending record is filtered by the threshold first, so no error.
+        let p = tmp(
+            "range2.tsv",
+            "chr1\t10\t11\t100\t50\t50\nchr1\t12\t13\t250\t1\t1\n",
+        );
+        assert_eq!(n(&p, "bismarkcov", 10.0).unwrap(), 1);
+        assert!(n(&p, "bismarkcov", 1.0).is_err());
+    }
+
+    #[test]
+    fn a_missing_file_is_an_io_error_with_its_path() {
+        let e = n(std::path::Path::new("/nonexistent/x.bed"), "epp", 1.0).unwrap_err();
+        assert!(e.path().is_some());
+        assert!(e.to_string().contains("nonexistent"), "{e}");
+    }
+}
