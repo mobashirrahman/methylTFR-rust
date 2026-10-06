@@ -5,12 +5,15 @@ the R/Bioconductor package that scores DNA methylation footprints at
 transcription factor binding sites.
 
 It reads the same six methylation call formats, does the same arithmetic, and
-agrees with the R package to about 13 decimal places. On a 2M-site benchmark it
-is about 9× faster on one thread and uses a fifth of the memory.
+agrees with the R package to about 13 decimal places. On a real whole-genome
+methylome it is 10.7× faster than R and uses less memory; on a 2M-site benchmark
+it is about 9× faster on one thread.
 
 > Status: the core calculation is ported and verified against methylTFR 0.99.9.
-> It has been tested on the package's bundled example and on synthetic data, not
-> yet on a real whole-genome methylome. Plotting, statistics and the
+> It has been tested on the package's bundled example, on synthetic data, and on
+> a real whole-genome T-cell methylome — one of the four ENCODE samples the
+> methylTFR paper itself validates on — against the published hg38 JASPAR2020
+> annotation. See [Real data](#real-data). Plotting, statistics and the
 > Bioconductor object layer are out of scope; see [Scope](#scope).
 
 ## What it computes
@@ -67,15 +70,19 @@ Parity came first; nothing was optimised until it held. Everything is checked
 against methylTFR 0.99.9 at commit
 [`8aeab03`](https://github.com/EpigenomeInformatics/methylTFR/commit/8aeab03cb469a9c213b7cd7fd2cbe6eeb8db5856).
 
-| Check | Result |
-|---|---|
-| Bundled BATF example (two fixture revisions) | differs from R by 2.2e-16, i.e. the last bit |
-| 200 randomized cases generated and scored by R | worst absolute error 1.3e-13, worst relative 6.0e-12 |
-| Error behaviour | all 23 cases where R raises an error also fail in Rust |
-| Parsers, six formats | scores and coverage bit-identical to `read_methylome()` |
-| R numeric primitives (`round`, `seq`, `cut`) | bit-identical on R-generated tables |
-| 50-motif, 2M-site benchmark output | worst absolute difference from R 4.4e-16 |
-| 1, 2, 4, 8 and 16 threads | output files byte-identical |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/parity-dark.svg">
+  <img src="docs/img/parity-light.svg" alt="Of 177 randomized cases, 84 match R exactly and the rest differ by at most about 1e-13, against a test tolerance of 1e-10." width="680">
+</picture>
+
+Of 177 randomized cases scored by R, 84 match in every digit of every value and
+the worst differs by 1.3e-13. The other checks:
+
+- **Bundled BATF example:** differs from R by 2.2e-16, the last bit.
+- **Error behaviour:** all 23 further cases where R raises an error also fail in Rust.
+- **Parsers, six formats:** scores and coverage bit-identical to `read_methylome()`.
+- **R numeric primitives** (`round`, `seq`, `cut`): bit-identical on R-generated tables.
+- **1 to 16 threads:** output files byte-identical.
 
 The output is not byte-identical to R's, and is not meant to be: R sums in
 extended precision and multiplies matrices through BLAS, so the last digit or
@@ -94,6 +101,106 @@ Getting this close meant reproducing R behaviour that is easy to get wrong:
 The three places where the port knowingly differs are listed in
 [`docs/divergences.md`](docs/divergences.md).
 
+## Real data
+
+Everything above is synthetic or bundled example data. This section is the same
+comparison on a real published dataset, chosen because the methylTFR paper uses
+it itself.
+
+**The sample.** `ENCFF355UVU`, from ENCODE experiment `ENCSR663MXB`: a primary
+human T cell, whole-genome bisulfite sequencing, GRCh38 bedMethyl, 58,607,924
+CpG records. The paper's data availability section names four ENCODE methylomes
+for its validation analysis — GM12878 (`ENCSR890UQO`), CD14+ monocytes
+(`ENCSR017BUL`), B cells (`ENCSR284TCU`) and T cells (`ENCSR663MXB`) — and this
+is the T-cell one, in the exact format and with the exact filter its methods
+specify: *"ENCODE (GRCh38 bedMethyl, CpGs with coverage of at least 5)"*. That
+filter leaves 40,410,035 sites.
+
+**The annotation.** The published `methylTFRAnnotationHg38` objects (Zenodo record
+22206980, CC-BY 4.0), the same ones the authors use: 632 JASPAR2020 motifs,
+263,425,993 binding sites, 102,942,317 GC windows. `scripts/export_real_annotation.R`
+converts them to the CLI's TSV directory, and
+`scripts/verify_real_annotation.R` then checks the conversion back against the
+originals — 1,904 checks, every GC-frequency value compared at 17 significant
+digits, every GC-window column over all 102.9M rows. Both implementations
+therefore solve the same problem, not two nearly identical ones.
+
+**Agreement.** All 632 motifs, worst case 1.428e-13 against a tolerance of
+1e-10. Only 3 motifs match R in every digit, which is expected and not a
+regression: a single motif here averages millions of methylation calls, so the
+extended-precision difference R introduces has far more places to accumulate
+than it did on the small randomized cases. The magnitude is the same 1e-13.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/realparity-dark.svg">
+  <img src="docs/img/realparity-light.svg" alt="Across 632 motifs on real data: 3 match R exactly, 6 differ by about 1e-16, 88 by about 1e-15, 528 by about 1e-14 and 7 by about 1e-13, against a test tolerance of 1e-10." width="680">
+</picture>
+
+**Speed and memory**, single run each, `/usr/bin/time`, Rust on all 16 threads.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/realbench-dark.svg">
+  <img src="docs/img/realbench-light.svg" alt="Wall time: 2310 s in R against 217 s in Rust on 16 threads, 11 times faster. Peak memory: 15.3 GiB in R against 12.3 GiB in Rust." width="680">
+</picture>
+
+The memory gap is much narrower here than on the 2M-site benchmark, and for a
+good reason: both programs now hold the annotation. Rust keeps every motif's
+binding sites resident, and at 32 bytes per interval those 263.4M sites are
+8.4 GB of the 13.3 GB the run accounts for, alongside 3.3 GB of GC windows and
+1.6 GB of methylation sites. The synthetic benchmark's 5× gap is the one to
+expect on a workload with a smaller annotation.
+
+**The result**, which is the point of running on real data at all: 632
+transcription factor activity scores from an actual T cell.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/realresult-dark.svg">
+  <img src="docs/img/realresult-light.svg" alt="Deviation scores for 632 motifs on a real T-cell methylome range from -0.14 to +0.38, mean -0.01." width="680">
+</picture>
+
+### The paper's own numbers come out
+
+The strongest available check is whether this setup reproduces a result the
+authors published. Their Figure 2E reports one number per motif per cell type
+from the aggregate methylation profile around motif occurrences; for T cells it
+gives CEBPB `0.01` ("unchanged") and SPI1 `-0.09` (mildly depleted), and notes
+that FOSL1::JUND is depleted in all four populations.
+
+`scripts/footprint_check.R` asks the reference build that question directly.
+Their summary statistic is in their analysis code rather than in the package, so
+the script uses a plainly defined one on the same scale — mean methylation in
+the middle interval against the mean of the two outer intervals, minus one, over
+the same five position intervals methylTFR's own arithmetic uses — and says so
+in its output. It is whole-genome, not restricted to the distal regions the paper
+uses, and it is one ENCODE sample rather than the paper's BLUEPRINT population.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/footprint-dark.svg">
+  <img src="docs/img/footprint-light.svg" alt="Methylation depletion at motif centres on a real T cell: SPI1 -0.093 against the paper's -0.09, CEBPB -0.025 against the paper's 0.01, and FOSL1::JUND -0.070, which the paper reports as depleted without a single value." width="680">
+</picture>
+
+SPI1 lands on the published value. CEBPB comes out slightly negative but small
+enough to still read as "unchanged", which is what the paper says it is.
+FOSL1::JUND is depleted, as reported, though the paper gives no single number for
+it. Two independent published values coming out of a pipeline that was never
+tuned on them is good evidence that the sample, the annotation and the arithmetic
+are all right.
+
+Reproducing the run needs no data in this repository. The sample and the
+annotation are downloaded from ENCODE and Zenodo, and
+[`docs/data/realdata_manifest.tsv`](docs/data/realdata_manifest.tsv) records every
+accession and SHA-256:
+
+```sh
+Rscript scripts/export_real_annotation.R <annotation_dir> <out_dir> all
+Rscript scripts/verify_real_annotation.R <annotation_dir> <out_dir>
+Rscript scripts/bench_real_r.R <annotation_dir> <sample.bed.gz> r.csv all
+target/release/methyltfr run --format encode --annotation <out_dir> \
+    --cov-threshold 5 -o rust.csv <sample.bed.gz>
+python3 scripts/realdata_report.py <run_dir>
+python3 scripts/plot_readme_figures.py
+```
+
 ## Performance
 
 Measured on an AMD Ryzen 7 3700X (8 cores, 16 threads); median of three runs,
@@ -107,24 +214,20 @@ wall time and peak RSS from `/usr/bin/time`. Inputs are synthetic.
   <img src="docs/img/benchmark-light.svg" alt="Wall time: 28.5 s in R, 3.25 s in Rust on one thread, 1.37 s on eight threads. Peak memory: 953 MiB in R, 207 MiB in Rust." width="680">
 </picture>
 
-| | Wall time | Speed-up | Peak memory |
-|---|---|---|---|
-| methylTFR (R), 1 thread | 28.5 s | 1.0× | 953 MiB |
-| methylTFR-rs, 1 thread | 3.25 s | 8.8× | 207 MiB |
-| methylTFR-rs, 8 threads | 1.37 s | 20.8× | 207 MiB |
-
 **Thread scaling** — 28M sites, 7.7M GC windows, 500 motifs × 250k binding sites.
 
-| Threads | Wall time | Speed-up |
-|---|---|---|
-| 1 | 499 s | 1.0× |
-| 2 | 265 s | 1.9× |
-| 4 | 151 s | 3.3× |
-| 8 | 93 s | 5.4× |
-| 16 | 78 s | 6.4× |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/scaling-dark.svg">
+  <img src="docs/img/scaling-light.svg" alt="Wall time by threads: 499 s on 1, 265 s on 2, 151 s on 4, 93 s on 8, 78 s on 16." width="680">
+</picture>
 
-Peak memory is 5.4 GB at every thread count. Not yet measured: R on the 28M-site
+Peak memory is 5.4 GB at every thread count. Scaling flattens past 8 threads,
+the machine's physical core count. Not yet measured: R on the 28M-site
 dataset, and R with multiple workers.
+
+[Real data](#real-data) repeats the comparison on a published whole-genome
+methylome, where R takes 38.5 minutes and Rust takes 3.6 minutes for the same
+632 motifs.
 
 ## How it was built
 
@@ -173,5 +276,12 @@ cargo test --release        # 189 tests
 methylTFR is by Irem B. Gündüz, Sarath Kumar Murugan and Fabian Mueller
 (Epigenome Informatics), MIT licensed. This port contains none of its source
 code; the test fixtures are derived from its example data. See [`NOTICE`](NOTICE).
+
+The [Real data](#real-data) section uses `ENCSR663MXB` from ENCODE and the
+`methylTFRAnnotationHg38` annotation from Zenodo record 22206980 (CC-BY 4.0).
+Neither is redistributed here. The sample and the results drawn from the
+methylTFR paper are cited as: Gündüz, Nitsch, Murugan and Mueller, *methylTFR:
+Computational quantification of transcription factor activity from DNA
+methylation*, bioRxiv [doi:10.64898/2026.09.29.755279](https://doi.org/10.64898/2026.09.29.755279).
 
 methylTFR-rs is released under the [MIT licence](LICENSE).
