@@ -329,10 +329,21 @@ fn every_committed_case_matches_r() {
     let mut n_enhancer = 0usize;
     let mut n_strand_aware = 0usize;
     let mut total = 0usize;
+    // Optional per-case report for the README parity figure
+    // (`scripts/plot_readme_figures.py`).
+    let mut report = String::from("case\tabs\trel\tcompared\tupstream_error\n");
 
     for dir in &dirs {
         let r = run_case_dir(dir);
         total += r.compared;
+        report.push_str(&format!(
+            "{}\t{:e}\t{:e}\t{}\t{}\n",
+            dir.file_name().unwrap().to_string_lossy(),
+            r.abs,
+            r.rel,
+            r.compared,
+            dir.join("error.txt").exists()
+        ));
         if dir.join("error.txt").exists() {
             n_errors += 1;
         }
@@ -350,6 +361,10 @@ fn every_committed_case_matches_r() {
             };
             worst_case = dir.file_name().unwrap().to_string_lossy().into_owned();
         }
+    }
+
+    if let Ok(path) = std::env::var("METHYLTFR_PARITY_REPORT") {
+        std::fs::write(&path, &report).expect("write parity report");
     }
 
     // Coverage of the paths that matter: a differential suite where every case
