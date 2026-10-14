@@ -1,0 +1,26 @@
+{
+  "deviation_max": 0.3766644883291974,
+  "deviation_mean": -0.013423953572706718,
+  "deviation_min": -0.1406304238831405,
+  "identical_motifs": 3,
+  "max_abs_diff": 1.4277468096679513e-13,
+  "memory_ratio": 1.2376927587589377,
+  "motifs": 632,
+  "r": {
+    "peak_rss_mib": 15640.69921875,
+    "wall_s": 2309.57
+  },
+  "r_timings": {
+    "loop_seconds": 2303.398,
+    "motifs": 632,
+    "slowest_motif": "FOXF2",
+    "slowest_motif_seconds": 81.054,
+    "slowest_motif_sites": 388898,
+    "tfbs_total": 263425993
+  },
+  "rust": {
+    "peak_rss_mib": 12636.98046875,
+    "wall_s": 216.84
+  },
+  "speedup_wall": 10.651033019738056
+}

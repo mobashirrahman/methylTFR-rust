@@ -1,0 +1,50 @@
+methylTFR-rs
+Copyright (c) 2026 methylTFR-rs contributors
+
+This project is an independent Rust reimplementation of the methylation
+deviation metric computed by the R / Bioconductor package `methylTFR`. It
+contains no upstream source code.
+
+================================================================================
+Upstream attribution
+================================================================================
+
+methylTFR
+  Authors:   Irem B. Gündüz (aut, cre)
+             Sarath Kumar Murugan (aut)
+             Fabian Mueller (aut)
+  Funded by: ERA-NET Transcan-Neu III - EPILUNAR (Grant 01KT2409)
+             Saarland University (NanoBioMed Young Investigator Grant)
+  Version:   0.99.9
+  Copyright: 2025 Epigenome Informatics
+  License:   MIT
+  URL:       https://github.com/EpigenomeInformatics/methylTFR
+
+`methylTFR` is licensed under the MIT License. Its licence text ships upstream
+in `LICENSE`; a copy is also reproduced in the pinned clone under
+`reference/methylTFR/LICENSE` (see `docs/reference-version.md`).
+
+================================================================================
+Derived data
+================================================================================
+
+The test fixtures
+
+    tests/fixtures/batf/
+    tests/fixtures/batf_1d99721/
+
+are derived from the example data distributed with `methylTFR` in
+`inst/extdata`, at the pinned commit and at commit `1d99721` respectively. They
+are converted from the upstream `GRanges` / `Rle` `.rda` objects into the
+plain tab-separated formats described in `docs/AGENT_PLAN.md` section 3, with no
+change to the underlying coordinates, scores, coverage values or GC bins.
+
+The fixtures
+
+    tests/fixtures/parsers/
+
+are copies of the methylation input examples distributed with `methylTFR` in
+`inst/extdata` (`*.tsv.gz`).
+
+These derived data files remain covered by the upstream MIT licence,
+Copyright (c) 2025 Epigenome Informatics.

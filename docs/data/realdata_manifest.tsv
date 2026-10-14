@@ -1,0 +1,15 @@
+key	value	note
+methylome_accession	ENCFF355UVU	ENCODE file, "methylation state at CpG", bedMethyl, GRCh38
+methylome_experiment	ENCSR663MXB	ENCODE WGBS experiment, primary T cell, Bradley Bernstein (Broad)
+methylome_donor	ENCDO661BYS	donor shared with ENCSR017BUL and ENCSR284TCU, so the paper's three primary methylomes are donor-controlled
+methylome_url	https://www.encodeproject.org/files/ENCFF355UVU/	downloaded as ENCFF355UVU.bed.gz
+methylome_sha256	4e25404ae67bf4bcbfa23565999c1d92719154e1e5861067ee12a8ff1b490a01	682,117,523 bytes compressed
+methylome_lines	58607924	CpG records in the file
+methylome_sites_cov5	40410035	records surviving the coverage >= 5 filter the paper's methods specify
+annotation_source	methylTFRAnnotationHg38	Zenodo record 22206980, CC-BY 4.0
+annotation_gcfreq_sha256	ab9f78e11265f2252ec1b39a056be0fd1f53668a46cba2e8f1b8c191aa8624f8	jaspar2020_motif_gcfreq.rds, 632 motifs, 5 GC bins x 507-525 columns
+annotation_tfbs_sha256	39a9b214b586b794ddf4eb4f59d650d8bd23451d171cfbfa84b8ec432835833d	jaspar2020_tf_bindsites.rds, 263,425,993 TFBS
+annotation_gc_sha256	e7acb92ccec0faa05b2d7e6152cc6b0a811991d0e1d202456903a55c68c2922c	genomewide_GC_hg38.rds, 102,942,317 GC windows, bins 1-5
+paper	doi:10.64898/2026.09.29.755279	Gunduz, Nitsch, Murugan, Mueller, bioRxiv, posted 2026-10-05
+paper_citation	"Whole-genome bisulfite methylomes were obtained from ENCODE for GM12878 (ENCSR890UQO), CD14+ monocytes (ENCSR017BUL), B cells (ENCSR284TCU), and T cells (ENCSR663MXB)."	Methods, data availability section
+paper_coverage	"ENCODE (GRCh38 bedMethyl, CpGs with coverage of at least 5)"	Methods; this is why cov_threshold is 5 and not 1
